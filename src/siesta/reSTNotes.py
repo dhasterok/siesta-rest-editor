@@ -19,7 +19,7 @@ from lame_core.CustomWidgets import CustomLineEdit, CustomAction, CustomActionMe
 
 from .SearchTool import SearchWidget
 
-ICON_PATH = Path(__file__).parents[2] / "resources" / "icons"
+from lame_core.config import ICONPATH as ICON_PATH
 
 def convert_rst_to_html(rst_path: Path) -> Path:
     """Converts an rst file to html given a file path.
