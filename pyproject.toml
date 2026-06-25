@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.backends.legacy:build"
+
+[project]
+name = "siesta-rest-editor"
+version = "0.1.0"
+description = "reStructuredText editor and notes panel"
+requires-python = ">=3.11"
+dependencies = [
+    "PyQt6",
+    "PyQt6-WebEngine",
+    "numpy",
+    "pandas",
+    "rst2pdf",
+    "docutils",
+    "lame-core",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
