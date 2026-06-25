@@ -1,0 +1,2 @@
+-e ../lame-core
+-e .
