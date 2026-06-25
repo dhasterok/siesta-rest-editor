@@ -17,7 +17,7 @@ import lame_core.format as fmt
 from .CodingWidgets import CodeEditor
 from lame_core.CustomWidgets import CustomLineEdit, CustomAction, CustomActionMenu, CustomDockWidget
 
-from .SearchTool import SearchWidget
+from lame_core.SearchTool import SearchWidget
 
 from lame_core.config import ICONPATH as ICON_PATH
 
