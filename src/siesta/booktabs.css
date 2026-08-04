@@ -1,0 +1,21 @@
+/* booktabs.css — LaTeX booktabs-style tables */
+table.docutils {
+    border-collapse: collapse;
+    border-top: 2px solid black;      /* toprule */
+    border-bottom: 2px solid black;   /* bottomrule */
+    border-left: none;
+    border-right: none;
+}
+
+table.docutils th {
+    border: none;
+    border-bottom: 1px solid black;   /* midrule */
+    background: none;
+    text-align: left;
+    padding: 4px 10px;
+}
+
+table.docutils td {
+    border: none;                     /* kills all vertical/horizontal grid */
+    padding: 4px 10px;
+}

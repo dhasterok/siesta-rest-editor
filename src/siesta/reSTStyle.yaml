@@ -1,0 +1,23 @@
+styles:
+  table:
+    spaceBefore: 8
+    spaceAfter: 8
+    commands:
+      # heavy rule across the top (toprule)
+      - [LINEABOVE, [0, 0], [-1, 0], 1.0, black]
+      # light rule beneath the header row (midrule)
+      - [LINEBELOW, [0, 0], [-1, 0], 0.5, black]
+      # heavy rule at the bottom (bottomrule)
+      - [LINEBELOW, [0, -1], [-1, -1], 1.0, black]
+      # padding — booktabs tables breathe a little
+      - [TOPPADDING, [0, 0], [-1, -1], 3]
+      - [BOTTOMPADDING, [0, 0], [-1, -1], 3]
+      - [LEFTPADDING, [0, 0], [-1, -1], 6]
+      - [RIGHTPADDING, [0, 0], [-1, -1], 6]
+      - [VALIGN, [0, 0], [-1, -1], MIDDLE]
+
+  table-heading:
+    parent: table-body      # kill the default heading background/color
+    backColor: null
+    fontName: stdBold
+    alignment: TA_LEFT

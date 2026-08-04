@@ -21,24 +21,36 @@ from lame_core.SearchTool import SearchWidget
 
 from lame_core.config import ICONPATH as ICON_PATH
 
-def convert_rst_to_html(rst_path: Path) -> Path:
+def convert_rst_to_html(rst_path: Path, css_path: Path | None = None) -> Path:
     """Converts an rst file to html given a file path.
-    
+
     Parameters
     ----------
-    rst_path : Posix.path
+    rst_path : Path
         Path to rst file
+    css_path : Path, optional
+        Custom CSS stylesheet applied in addition to the docutils defaults.
 
     Returns
     -------
-    html_path : str
-        Path to compiled html file as a str.
+    html_path : Path
+        Path to compiled html file.
     """
     html_path = rst_path.with_suffix('.html')
+
+    overrides = {}
+    if css_path is not None:
+        overrides = {
+            # default docutils CSS first, then yours overrides it
+            'stylesheet_path': f'html4css1.css,{css_path}',
+            'embed_stylesheet': True,
+        }
+
     publish_file(
         source_path=str(rst_path),
         destination_path=str(html_path),
-        writer_name='html'
+        writer_name='html',
+        settings_overrides=overrides,
     )
     return html_path
 
@@ -176,22 +188,15 @@ class NotesWidget(QWidget):
         self.setupUI()
         self.connect_widgets()
 
-        # autosave notes
+        # autosave notes -- actually wired up (and the file loaded, if it
+        # already exists) inside the notes_file setter below, once self._notes_file
+        # is no longer None.
         self.autosaveTimer = QTimer()
         self.autosaveTimer.setInterval(300000)
-
-        if self.notes_file is not None:
-            try:
-                self.autosaveTimer.timeout.connect(self.notes_file)
-            except:
-                QMessageBox.warning(self, "Warning", f"Autosave could not save notes to file ({self.notes_file}).")
 
         # initialize notes file and pdf preview
         self.notes_file = filename
         self.toggle_preview_notes()
-
-        if filename:
-            self.notes_file = filename
 
     def setupUI(self):
 
@@ -541,36 +546,45 @@ class NotesWidget(QWidget):
         if new_path is None:
             self.status_label.setText("FILE: load sample to display file")
             return
-        else:
-            self.status_label.setText(f"FILE: {str(new_path)}")
 
-            # generate the HTML preview
-            self.update_notes_view()
+        self.status_label.setText(f"FILE: {str(new_path)}")
 
-        # start autosave
-        try:
-            self.autosaveTimer.timeout.connect(self.save_notes_file)
-        except Exception:
-            self.status_label.setText(f"WARNING: Autoscave could not save notes to file (str{new_path})")
-            QMessageBox.warning(
-                self,
-                "Warning",
-                f"Autosave could not save notes to file ({new_path})."
-            )
-
-        # Load file if it exists
+        # Load the new file's content -- or clear the editor, for a sample
+        # that doesn't have a saved .rst yet -- before anything else touches
+        # self.editor. update_notes_view() below calls save_notes_file(),
+        # which (since self.notes_file already points at new_path at this
+        # point) would otherwise write the *previous* file's stale editor
+        # content into this new file, clobbering whatever was already saved
+        # there.
         if new_path.exists():
             try:
                 file_name = new_path.name
                 text = new_path.read_text()
                 if text == '':
+                    self.editor.clear()
                     self.status_label.setText(f"File ({file_name}) is empty.")
                 else:
-                    self.editor.setText(new_path.read_text())
+                    self.editor.setPlainText(text)
                     self.status_label.setText(f"File ({file_name}) loaded successfully.")
             except Exception:
                 file_name = new_path.name
                 self.status_label.setText(f"Cannot read {file_name}")
+        else:
+            self.editor.clear()
+
+        # generate the HTML preview (also autosaves via save_notes_file(),
+        # now safely reflecting the just-loaded/cleared content above)
+        self.update_notes_view()
+
+        # start autosave. This setter can run again for every later sample
+        # change, so disconnect first -- otherwise each switch stacks another
+        # timeout->save_notes_file connection, firing multiple redundant
+        # saves per tick.
+        try:
+            self.autosaveTimer.timeout.disconnect(self.save_notes_file)
+        except TypeError:
+            pass  # wasn't connected yet (e.g. first file of the session)
+        self.autosaveTimer.timeout.connect(self.save_notes_file)
 
         self.autosaveTimer.start()
 
@@ -1059,8 +1073,16 @@ class NotesWidget(QWidget):
             # Read the .rst file content
             rst_content = rst_path.read_text(encoding='utf-8')  # specify encoding for robustness
 
-            # Generate PDF content
-            pdf = RstToPdf()
+            # Use the local stylesheet for PDF compilation if available
+            style_file = Path(__file__).resolve().parent / 'reSTStyle.yaml'
+            if style_file.exists():
+                pdf = RstToPdf(
+                    stylesheets=[style_file.name],
+                    style_path=[str(style_file.parent)],
+                )
+            else:
+                pdf = RstToPdf()
+
             pdf_content = pdf.createPdf(text=rst_content, output=str(pdf_file_path))  # ensure output path is a string
 
             self.status_label.setText(f"Saved: {str(pdf_file_path)}")
@@ -1161,7 +1183,8 @@ class NotesWidget(QWidget):
             self.status_label.setText(f"ERROR: Failed to save {str(self.notes_file)}")
             return
         
-        html_file = convert_rst_to_html(self.notes_file)
+        css_file = Path(__file__).resolve().parent / 'booktabs.css'
+        html_file = convert_rst_to_html(self.notes_file, css_path=css_file if css_file.exists() else None)
         if not html_file.exists():
             self.status_label.setText(f"WARNING: HTML not generated: {html_file}")
             return
