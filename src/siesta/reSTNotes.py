@@ -236,6 +236,7 @@ class NotesWidget(QWidget):
             dark_icon_unchecked="icon-bold-dark-64.svg",
             parent=self.toolbar,
         )
+        self.action_bold.setShortcut("Ctrl+B")
         self.action_bold.setToolTip("Bold selected text")
 
         # italic button
@@ -245,6 +246,7 @@ class NotesWidget(QWidget):
             dark_icon_unchecked="icon-italics-dark-64.svg",
             parent=self.toolbar,
         )
+        self.action_italic.setShortcut("Ctrl+I")
         self.action_italic.setToolTip("Italicize selected text")
 
         # literal button
@@ -254,6 +256,7 @@ class NotesWidget(QWidget):
             dark_icon_unchecked="icon-literal-dark-64.svg",
             parent=self.toolbar,
         )
+        self.action_literal.setShortcut("Ctrl+L")
         self.action_literal.setToolTip("Display selected text as a literal")
 
         # superscript button
@@ -263,6 +266,7 @@ class NotesWidget(QWidget):
             dark_icon_unchecked="icon-superscript-dark-64.svg",
             parent=self.toolbar,
         )
+        self.action_superscript.setShortcut("Ctrl+.")
         self.action_superscript.setToolTip("Superscript selected text")
 
         # subscript button
@@ -272,6 +276,7 @@ class NotesWidget(QWidget):
             dark_icon_unchecked="icon-subscript-dark-64.svg",
             parent=self.toolbar,
         )
+        self.action_superscript.setShortcut("Ctrl+,")
         self.action_subscript.setToolTip("Subscript selected text")
 
         self.toolbar.addSeparator()
@@ -345,6 +350,7 @@ class NotesWidget(QWidget):
             dark_icon_unchecked="icon-image-64.svg",
             parent=self.toolbar,
         )
+        self.action_image.setShortcut("Ctrl+P")
         self.action_image.setToolTip("Insert figure")
 
         # info button and menu
@@ -382,6 +388,7 @@ class NotesWidget(QWidget):
             light_icon_unchecked="icon-pdf-64.svg",
             parent=self.toolbar
         )
+        self.action_export.setShortcut("Ctrl+S")
         self.action_export.setToolTip("Save notes as PDF (must have docutils and rst2pdf installed)")
 
         self.action_search = CustomAction(
@@ -390,6 +397,7 @@ class NotesWidget(QWidget):
             dark_icon_unchecked="icon-search-dark-64.svg",
             parent=self.toolbar,
         )
+        self.action_search.setShortcut("Ctrl+F")
         self.action_search.setCheckable(True)
         self.action_search.setChecked(False)
 
@@ -400,6 +408,7 @@ class NotesWidget(QWidget):
             light_icon_checked="icon-show-64.svg",
             parent=self.toolbar,
         )
+        self.action_preview_pdf.setShortcut("Ctrl+V")
         self.action_preview_pdf.setToolTip("Preview PDF")
         self.action_preview_pdf.setCheckable(True)
         self.action_preview_pdf.setChecked(False)
@@ -496,7 +505,7 @@ class NotesWidget(QWidget):
         self.action_enumerate.triggered.connect(lambda: self.format_list('enumerate'))
         self.action_cite.triggered.connect(lambda: self.format_text('citation'))
         self.action_hyperlink.triggered.connect(lambda: self.format_text('hyperlink'))
-        self.action_image.triggered.connect(self.insert_image)
+        self.action_image.triggered.connect(lambda: self.insert_image())
         self.action_options.triggered.connect(self.open_note_options)
         self.action_export.triggered.connect(lambda _: self.save_notes_to_pdf()) # compile rst
         self.action_search.triggered.connect(lambda checked: self.searchbar.setVisible(checked))
@@ -698,7 +707,14 @@ class NotesWidget(QWidget):
 
     def _insert_image(self, filenames, halign, width, alt_text, caption):
         for fn in filenames:
-            self.editor.insertPlainText(f"\n\n.. figure:: {fn}\n")
+            # as_posix() gives a forward-slash path that docutils/rst2pdf
+            # resolve correctly on both macOS and Windows. The figure
+            # directive's argument is parsed by docutils.parsers.rst.
+            # directives.uri(), which *strips any unescaped whitespace* --
+            # so a literal space would silently corrupt the path unless
+            # each space is escaped with a backslash.
+            figure_path = Path(fn).as_posix().replace(' ', r'\ ')
+            self.editor.insertPlainText(f"\n\n.. figure:: {figure_path}\n")
             self.editor.insertPlainText(f"    :align: {halign}\n")
             self.editor.insertPlainText(f"    :alt: {alt_text}\n")
             self.editor.insertPlainText(f"    :width: {width}mm\n")
@@ -725,9 +741,9 @@ class NotesWidget(QWidget):
             else:
                 return
 
-        if isinstance(filename,str):
-            filename = list(filename)
-        elif not isinstance(filename,list):
+        if isinstance(filename, (str, Path)):
+            filename = [filename]
+        elif not isinstance(filename, list):
             QMessageBox.warning(self, "Error", f"Filenames must be a str or list.")
 
 
@@ -742,10 +758,10 @@ class NotesWidget(QWidget):
             return
 
         if alt_text is None:
-            alt_text = "Alternate text goes here\n"
+            alt_text = "Alternate text goes here"
 
         if caption is None:
-            caption = "Caption goes here\n"
+            caption = "Caption goes here"
 
         self._insert_image(filename, halign, width, alt_text, caption)
 
@@ -1066,20 +1082,36 @@ class NotesWidget(QWidget):
         str
             Table in restructred text format
         """
-        def rst_row(row):
-            return ' '.join(f'{str(item):^10}' for item in row)
-
         # Extracting column names and data as lists
         columns = df.columns.tolist()
         data = df.values.tolist()
-        
-        # Creating reST table components
+
+        # Column widths must fit the widest cell in each column (header or
+        # body) -- a fixed width silently breaks alignment, and therefore
+        # docutils' table parsing, for any value longer than that fixed
+        # width (e.g. a field name like "Hf176 / Hf177" or a field type like
+        # "Analyte (normalized)").
+        widths = [
+            max(len(str(columns[i])), max((len(str(row[i])) for row in data), default=0))
+            for i in range(len(columns))
+        ]
+
+        def rst_row(row):
+            return ' '.join(f'{str(item):^{widths[i]}}' for i, item in enumerate(row))
+
+        # Creating reST table components. A docutils "simple table" needs a
+        # top border, the header, a header/body border, the body rows, and a
+        # bottom border -- all built from '=' (a lone '-' separator after the
+        # header, with no top/bottom border, is not valid table syntax and
+        # docutils silently renders it as plain paragraph text instead).
         header = rst_row(columns)
-        separator = ' '.join(['-'*10]*len(columns))
+        border = ' '.join('=' * w for w in widths)
         rows = [rst_row(row) for row in data]
-        
-        # Combining components into the reST table format
-        rst_table = '\n'.join([header, separator] + rows)
+
+        # Combining components into the reST table format. Leading/trailing
+        # blank lines are required so the table is recognized as its own
+        # block, separate from whatever text precedes/follows it in the notes.
+        rst_table = '\n'.join(['', border, header, border] + rows + [border, ''])
         return rst_table
 
     def closeEvent(self, event):
