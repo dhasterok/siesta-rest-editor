@@ -1,21 +1,22 @@
 from pathlib import Path
 import re, subprocess
-from PyQt6.QtCore import ( Qt, QTimer, QSize, QUrl )
+from PyQt6.QtCore import ( Qt, QTimer, QSize, QUrl, pyqtSignal )
 from PyQt6.QtWidgets import (
         QMainWindow, QMessageBox, QFileDialog, QWidget, QVBoxLayout, QFormLayout, QSizePolicy,
-        QLabel, QDialog, QDialogButtonBox, QToolBar, QSplitter, QTabWidget,
+        QStatusBar, QDialog, QDialogButtonBox, QToolBar, QSplitter, QTabWidget,
     )
-from PyQt6.QtGui import ( QTextCursor, QIcon, QCursor, QDoubleValidator )
+from PyQt6.QtGui import ( QTextCursor, QIcon, QCursor, QDoubleValidator, QKeySequence )
 from PyQt6.QtWebEngineWidgets import QWebEngineView
 from datetime import datetime
 import numpy as np
-import pandas as pd   
+import pandas as pd
 from rst2pdf.createpdf import RstToPdf
 from docutils.core import publish_string, publish_file
 import lame_core.format as fmt
 
 from .CodingWidgets import CodeEditor
 from lame_core.CustomWidgets import CustomLineEdit, CustomAction, CustomActionMenu, CustomDockWidget
+from lame_core.PagedToolBar import PagedToolBar
 
 from lame_core.SearchTool import SearchWidget
 
@@ -105,6 +106,15 @@ class NotesFormatter:
 # -------------------------------
 # Notes functions
 # -------------------------------
+def _apply_title_suffix(window: QWidget, base_title: str, suffix: str):
+    """Sets ``window``'s title to ``base_title``, plus ``suffix`` (e.g. "(notes.rst*)") if non-empty.
+
+    Shared by ``NotesMainWindow`` and ``NotesDock``, both of which mirror
+    ``NotesWidget.titleChanged`` onto their own window title this way.
+    """
+    window.setWindowTitle(f"{base_title} {suffix}" if suffix else base_title)
+
+
 class NotesMainWindow(QMainWindow):
     """A reSTructuredText editor built with PyQt6
 
@@ -114,10 +124,14 @@ class NotesMainWindow(QMainWindow):
     """
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("reST Editor")
+        self._base_title = "reST Editor"
+        self.setWindowTitle(self._base_title)
 
         self.notes = NotesWidget(ui=self)
         self.setCentralWidget(self.notes)
+
+        self.notes.titleChanged.connect(lambda suffix: _apply_title_suffix(self, self._base_title, suffix))
+        _apply_title_suffix(self, self._base_title, self.notes.title_suffix)
 
 
 class NotesDock(CustomDockWidget):
@@ -146,6 +160,7 @@ class NotesDock(CustomDockWidget):
     """
     def __init__(self, parent: QMainWindow=None, filename: str|Path|None=None, title: str='reST Editor'):
         super().__init__(parent=parent)
+        self._base_title = title
         self.setWindowTitle(title)
 
         self.notes = NotesWidget(ui=self, filename=filename)
@@ -155,6 +170,9 @@ class NotesDock(CustomDockWidget):
         parent.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, self)
         self.setFloating(True)
         self.setWindowFlags(Qt.WindowType.Window | Qt.WindowType.CustomizeWindowHint | Qt.WindowType.WindowMinMaxButtonsHint | Qt.WindowType.WindowCloseButtonHint)
+
+        self.notes.titleChanged.connect(lambda suffix: _apply_title_suffix(self, self._base_title, suffix))
+        _apply_title_suffix(self, self._base_title, self.notes.title_suffix)
 
 class NotesTab(QWidget):
     def __init__(self, tab_widget: QTabWidget, filename: str|Path|None=None, title: str="reST Editor"):
@@ -178,6 +196,9 @@ class NotesTab(QWidget):
         self.tab_widget.addTab(self, notes_icon, title)
 
 class NotesWidget(QWidget):
+    notesFileChanged = pyqtSignal(object)
+    titleChanged = pyqtSignal(str)
+
     def __init__(self, ui=None, filename: str|Path|None=None):
         super().__init__()
         self.ui = ui
@@ -198,22 +219,89 @@ class NotesWidget(QWidget):
         self.notes_file = filename
         self.toggle_preview_notes()
 
+    def _styled_page_toolbar(self):
+        toolbar = QToolBar()
+        toolbar.setIconSize(QSize(24, 24))
+        toolbar.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextUnderIcon)
+        return toolbar
+
     def setupUI(self):
 
         # Create the layout within parent.tabWorkflow
-        widget_layout = QVBoxLayout()   
+        widget_layout = QVBoxLayout()
+        widget_layout.setContentsMargins(2, 2, 2, 2)
+        widget_layout.setSpacing(2)
 
-        # Create toolbar
-        self.toolbar = QToolBar("Notes Toolbar", self)
-        self.toolbar.setIconSize(QSize(24, 24))
-        self.toolbar.setMovable(False)  # Optional: Prevent toolbar from being dragged out
-        self.toolbar.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextUnderIcon)
+        # Create ribbon toolbar (page tabs + pinned row + swappable page content)
+        self.ribbon = PagedToolBar(self)
+        self.ribbon.pinned_bar.setIconSize(QSize(24, 24))
+        self.ribbon.pinned_bar.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextUnderIcon)
+
+        # New note
+        self.action_new = CustomAction(
+            text="New",
+            light_icon_unchecked="icon-add-list-64.svg",
+            dark_icon_unchecked="icon-add-list-dark-64.svg",
+            parent=self.ribbon,
+        )
+        self.action_new.setShortcut(QKeySequence("Ctrl+N"))
+        self.action_new.setToolTip("Start a new, blank note")
+
+        # Open note
+        self.action_open = CustomAction(
+            text="Open",
+            light_icon_unchecked="icon-open-file-64.svg",
+            dark_icon_unchecked="icon-open-file-dark-64.svg",
+            parent=self.ribbon,
+        )
+        self.action_open.setShortcut(QKeySequence("Ctrl+O"))
+        self.action_open.setToolTip("Open an existing note file")
+
+        # Save note
+        self.action_save = CustomAction(
+            text="Save",
+            light_icon_unchecked="icon-save-file-64.svg",
+            parent=self.ribbon,
+        )
+        self.action_save.setShortcut(QKeySequence("Ctrl+S"))
+        self.action_save.setToolTip("Save the current note")
+
+        # Save note as
+        self.action_save_as = CustomAction(
+            text="Save As",
+            light_icon_unchecked="icon-save-file-64.svg",
+            parent=self.ribbon,
+        )
+        self.action_save_as.setShortcut(QKeySequence("Ctrl+Shift+S"))
+        self.action_save_as.setToolTip("Save the current note to a new file")
+
+        # Undo
+        self.action_undo = CustomAction(
+            text="Undo",
+            light_icon_unchecked="icon-reverse-64.svg",
+            dark_icon_unchecked="icon-reverse-dark-64.svg",
+            parent=self.ribbon,
+        )
+        self.action_undo.setShortcut(QKeySequence.StandardKey.Undo)
+        self.action_undo.setToolTip("Undo the last change")
+        self.action_undo.setEnabled(False)
+
+        # Redo
+        self.action_redo = CustomAction(
+            text="Redo",
+            light_icon_unchecked="icon-redo-64.svg",
+            dark_icon_unchecked="icon-redo-dark-64.svg",
+            parent=self.ribbon,
+        )
+        self.action_redo.setShortcut(QKeySequence.StandardKey.Redo)
+        self.action_redo.setToolTip("Redo the last undone change")
+        self.action_redo.setEnabled(False)
 
         self.action_wrap = CustomAction(
-            text="Wrap", 
+            text="Wrap",
             light_icon_unchecked="icon-word-wrap-64.svg",
             dark_icon_unchecked="icon-word-wrap-dark-64.svg",
-            parent=self.toolbar)
+            parent=self.ribbon)
         self.action_wrap.setCheckable(True)
         self.action_wrap.setChecked(True)
 
@@ -239,7 +327,7 @@ class NotesWidget(QWidget):
             text="Bold",
             light_icon_unchecked="icon-bold-64.svg",
             dark_icon_unchecked="icon-bold-dark-64.svg",
-            parent=self.toolbar,
+            parent=self.ribbon,
         )
         self.action_bold.setShortcut("Ctrl+B")
         self.action_bold.setToolTip("Bold selected text")
@@ -249,7 +337,7 @@ class NotesWidget(QWidget):
             text="Italic",
             light_icon_unchecked="icon-italics-64.svg",
             dark_icon_unchecked="icon-italics-dark-64.svg",
-            parent=self.toolbar,
+            parent=self.ribbon,
         )
         self.action_italic.setShortcut("Ctrl+I")
         self.action_italic.setToolTip("Italicize selected text")
@@ -259,7 +347,7 @@ class NotesWidget(QWidget):
             text="Literal",
             light_icon_unchecked="icon-literal-64.svg",
             dark_icon_unchecked="icon-literal-dark-64.svg",
-            parent=self.toolbar,
+            parent=self.ribbon,
         )
         self.action_literal.setShortcut("Ctrl+L")
         self.action_literal.setToolTip("Display selected text as a literal")
@@ -269,7 +357,7 @@ class NotesWidget(QWidget):
             text="Superscript",
             light_icon_unchecked="icon-superscript-64.svg",
             dark_icon_unchecked="icon-superscript-dark-64.svg",
-            parent=self.toolbar,
+            parent=self.ribbon,
         )
         self.action_superscript.setShortcut("Ctrl+.")
         self.action_superscript.setToolTip("Superscript selected text")
@@ -279,12 +367,10 @@ class NotesWidget(QWidget):
             text="Subscript",
             light_icon_unchecked="icon-subscript-64.svg",
             dark_icon_unchecked="icon-subscript-dark-64.svg",
-            parent=self.toolbar,
+            parent=self.ribbon,
         )
         self.action_superscript.setShortcut("Ctrl+,")
         self.action_subscript.setToolTip("Subscript selected text")
-
-        self.toolbar.addSeparator()
 
         # bulleted list button
         bullet_menu_items = [
@@ -300,7 +386,7 @@ class NotesWidget(QWidget):
             menu_items=bullet_menu_items,
             light_icon_unchecked="icon-bullet-list-64.svg",
             dark_icon_unchecked="icon-bullet-list-dark-64.svg",
-            parent=self.toolbar,
+            parent=self.ribbon,
         )
         self.action_bullet.setToolTip("Format bulleted list")
 
@@ -309,7 +395,7 @@ class NotesWidget(QWidget):
             text="Enumerate",
             light_icon_unchecked="icon-numbered-list-64.svg",
             dark_icon_unchecked="icon-numbered-list-dark-64.svg",
-            parent=self.toolbar,
+            parent=self.ribbon,
         )
         self.action_enumerate.setToolTip("Format enumerated list")
 
@@ -318,7 +404,7 @@ class NotesWidget(QWidget):
             text="Reference",
             light_icon_unchecked="icon-cite-64.svg",
             dark_icon_unchecked="icon-cite-dark-64.svg",
-            parent=self.toolbar,
+            parent=self.ribbon,
         )
         self.action_cite.setToolTip("Insert citation or footnote")
 
@@ -327,7 +413,7 @@ class NotesWidget(QWidget):
             text="Hyperlink",
             light_icon_unchecked="icon-hyperlink-64.svg",
             dark_icon_unchecked="icon-hyperlink-dark-64.svg",
-            parent=self.toolbar,
+            parent=self.ribbon,
         )
         self.action_hyperlink.setToolTip("Insert hyperlink")
 
@@ -344,7 +430,7 @@ class NotesWidget(QWidget):
             math_menu_items,
             light_icon_unchecked="icon-equation-64.svg",
             dark_icon_unchecked="icon-equation-dark-64.svg",
-            parent=self.toolbar,
+            parent=self.ribbon,
         )
         self.action_math.setToolTip("Insert equation")
 
@@ -353,7 +439,7 @@ class NotesWidget(QWidget):
             text="Figure",
             light_icon_unchecked="icon-image-dark-64.svg",
             dark_icon_unchecked="icon-image-64.svg",
-            parent=self.toolbar,
+            parent=self.ribbon,
         )
         self.action_image.setShortcut("Ctrl+P")
         self.action_image.setToolTip("Insert figure")
@@ -373,7 +459,7 @@ class NotesWidget(QWidget):
             self._info_menu_items,
             light_icon_unchecked="icon-formatted-output-64.svg",
             dark_icon_unchecked="icon-formatted-output-dark-64.svg",
-            parent=self.toolbar
+            parent=self.ribbon
         )
         self.action_info.setToolTip("Insert formatted info")
 
@@ -382,7 +468,7 @@ class NotesWidget(QWidget):
             text="Options",
             light_icon_unchecked="icon-gear-64.svg",
             dark_icon_unchecked="icon-gear-dark-64.svg",
-            parent=self.toolbar,
+            parent=self.ribbon,
         )
         self.action_options.setToolTip("Options")
 
@@ -391,16 +477,16 @@ class NotesWidget(QWidget):
             "Save PDF",
             self._info_menu_items,
             light_icon_unchecked="icon-pdf-64.svg",
-            parent=self.toolbar
+            parent=self.ribbon
         )
-        self.action_export.setShortcut("Ctrl+S")
+        self.action_export.setShortcut("Ctrl+Shift+E")
         self.action_export.setToolTip("Save notes as PDF (must have docutils and rst2pdf installed)")
 
         self.action_search = CustomAction(
             text="Open Search",
             light_icon_unchecked="icon-search-64.svg",
             dark_icon_unchecked="icon-search-dark-64.svg",
-            parent=self.toolbar,
+            parent=self.ribbon,
         )
         self.action_search.setShortcut("Ctrl+F")
         self.action_search.setCheckable(True)
@@ -411,7 +497,7 @@ class NotesWidget(QWidget):
             text="View PDF",
             light_icon_unchecked="icon-show-hide-64.svg",
             light_icon_checked="icon-show-64.svg",
-            parent=self.toolbar,
+            parent=self.ribbon,
         )
         self.action_preview_pdf.setShortcut("Ctrl+V")
         self.action_preview_pdf.setToolTip("Preview PDF")
@@ -423,7 +509,7 @@ class NotesWidget(QWidget):
             text="Refresh",
             light_icon_unchecked="icon-reset-64.svg",
             dark_icon_unchecked="icon-reset-dark-64.svg",
-            parent=self.toolbar,
+            parent=self.ribbon,
         )
         self.action_recompile.setToolTip("Recompile document")
 
@@ -438,39 +524,72 @@ class NotesWidget(QWidget):
             text="Editor Settings",
             light_icon_unchecked="icon-gear-edit-64.svg",
             dark_icon_unchecked="icon-gear-edit-dark-64.svg",
-            parent=self.toolbar,
+            parent=self.ribbon,
         )
         self.action_editor.setIcon(settings_icon)
         self.action_editor.setToolTip("Editor Settings")
 
 
-        # add buttons to toolbar
-        self.toolbar.addAction(self.action_header)
-        self.toolbar.addAction(self.action_bold)
-        self.toolbar.addAction(self.action_italic)
-        self.toolbar.addAction(self.action_literal)
-        self.toolbar.addAction(self.action_superscript)
-        self.toolbar.addAction(self.action_subscript)
-        self.toolbar.addAction(self.action_bullet)
-        self.toolbar.addAction(self.action_enumerate)
+        # Build ribbon pages: Standard, Formatting, Insert, View
+        standard_toolbar = self._styled_page_toolbar()
+        standard_toolbar.addAction(self.action_new)
+        standard_toolbar.addAction(self.action_open)
+        standard_toolbar.addAction(self.action_save)
+        standard_toolbar.addAction(self.action_save_as)
+        standard_toolbar.addSeparator()
+        standard_toolbar.addAction(self.action_undo)
+        standard_toolbar.addAction(self.action_redo)
+        standard_toolbar.addSeparator()
+        standard_toolbar.addAction(self.action_search)
 
-        self.toolbar.addSeparator()
-        self.toolbar.addAction(self.action_cite)
-        self.toolbar.addAction(self.action_hyperlink)
+        formatting_toolbar = self._styled_page_toolbar()
+        formatting_toolbar.addAction(self.action_header)
+        formatting_toolbar.addAction(self.action_bold)
+        formatting_toolbar.addAction(self.action_italic)
+        formatting_toolbar.addAction(self.action_literal)
+        formatting_toolbar.addAction(self.action_superscript)
+        formatting_toolbar.addAction(self.action_subscript)
+        formatting_toolbar.addSeparator()
+        formatting_toolbar.addAction(self.action_bullet)
+        formatting_toolbar.addAction(self.action_enumerate)
 
-        self.toolbar.addSeparator()
-        self.toolbar.addAction(self.action_math)
-        self.toolbar.addAction(self.action_image)
-        self.toolbar.addAction(self.action_options)
+        # Kept as an attribute -- action_info is added/removed dynamically
+        # from this page by the info_menu_items setter and
+        # add_info_menu_item/remove_info_menu_item, since it's only shown
+        # once there's something to put in its menu.
+        self._insert_toolbar = self._styled_page_toolbar()
+        self._insert_toolbar.addAction(self.action_cite)
+        self._insert_toolbar.addAction(self.action_hyperlink)
+        self._insert_toolbar.addSeparator()
+        self._insert_toolbar.addAction(self.action_math)
+        self._insert_toolbar.addAction(self.action_image)
 
-        self.toolbar.addSeparator()
-        self.toolbar.addAction(self.action_search)
-        self.toolbar.addSeparator()
+        view_toolbar = self._styled_page_toolbar()
+        view_toolbar.addAction(self.action_wrap)
+        view_toolbar.addAction(self.action_options)
+        view_toolbar.addSeparator()
+        view_toolbar.addAction(self.action_export)
+        view_toolbar.addAction(self.action_recompile)
+        view_toolbar.addAction(self.action_preview_pdf)
+        view_toolbar.addAction(self.action_editor)
 
-        self.toolbar.addAction(self.action_export)
-        self.toolbar.addAction(self.action_recompile)
-        self.toolbar.addAction(self.action_preview_pdf)
-        self.toolbar.addAction(self.action_editor)
+        self.ribbon.add_page("Standard", standard_toolbar)
+        self.ribbon.add_page("Formatting", formatting_toolbar)
+        self.ribbon.add_page("Insert", self._insert_toolbar)
+        self.ribbon.add_page("View", view_toolbar)
+
+        # Pinned row -- always visible regardless of which page is showing.
+        pinned = self.ribbon.pinned_bar
+        pinned.addAction(self.action_save)
+        pinned.addAction(self.action_undo)
+        pinned.addAction(self.action_redo)
+        pinned.addSeparator()
+
+        # Each add_page() call above already ran sync_content_height(), but
+        # pinned_bar had no actions yet at that point, so the page area's
+        # fixed height was locked in from an empty (near-zero height) pinned
+        # bar. Run it again now that pinned_bar has its real content.
+        self.ribbon.sync_content_height()
 
         # Create search
         self.searchbar = QToolBar("Search and Replace", parent=self)
@@ -489,18 +608,39 @@ class NotesWidget(QWidget):
         self.splitter.addWidget(self.notes_browser)
         self.splitter.setSizes([190,190])
 
-        self.status_label = QLabel()
-        self.status_label.setFixedHeight(22)
+        # A plain QStatusBar rather than QMainWindow.setStatusBar(): NotesWidget
+        # is reused inside NotesMainWindow (a QMainWindow), NotesDock, and
+        # NotesTab alike, and only the first of those has a real status bar to
+        # claim -- LaserMapExplorer's own QMainWindow already has one (with its
+        # own unrelated messages/Notes indicator) that a docked NotesWidget has
+        # no business taking over. Used as a plain widget, QStatusBar still
+        # gives the native sunken-panel look and sizes itself sensibly, which
+        # is the point here -- no setStatusBar() call needed for that.
+        self.status_bar = QStatusBar()
+        # QStatusBar's default vertical size policy is Preferred, not Fixed --
+        # same class of bug as PagedToolBar (see its own setSizePolicy call):
+        # left alone, a plain QVBoxLayout stretches it to share leftover
+        # vertical space with the splitter instead of sizing to content.
+        self.status_bar.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
 
-        widget_layout.addWidget(self.toolbar)
+        widget_layout.addWidget(self.ribbon)
         widget_layout.addWidget(self.searchbar)
         widget_layout.addWidget(self.splitter)
-        widget_layout.addWidget(self.status_label)
+        widget_layout.addWidget(self.status_bar)
 
         # Set layout to the container
         self.setLayout(widget_layout)
 
     def connect_widgets(self):
+        self.action_new.triggered.connect(self.new_notes_file)
+        self.action_open.triggered.connect(self.open_notes_file)
+        self.action_save.triggered.connect(self.save_notes_file)
+        self.action_save_as.triggered.connect(self.save_notes_file_as)
+        self.action_undo.triggered.connect(self.editor.undo)
+        self.action_redo.triggered.connect(self.editor.redo)
+        self.editor.document().undoAvailable.connect(self.action_undo.setEnabled)
+        self.editor.document().redoAvailable.connect(self.action_redo.setEnabled)
+        self.editor.document().modificationChanged.connect(self._on_modification_changed)
         self.action_wrap.triggered.connect(lambda checked: self.editor.setWordWrap(checked))
         self.action_bold.triggered.connect(lambda: self.format_text('bold'))
         self.action_italic.triggered.connect(lambda: self.format_text('italic'))
@@ -544,10 +684,13 @@ class NotesWidget(QWidget):
         self._notes_file = new_path
 
         if new_path is None:
-            self.status_label.setText("FILE: load sample to display file")
+            self.editor.clear()
+            self.status_bar.showMessage("FILE: load sample to display file")
+            self.notesFileChanged.emit(None)
+            self._update_title()
             return
 
-        self.status_label.setText(f"FILE: {str(new_path)}")
+        self.status_bar.showMessage(f"FILE: {str(new_path)}")
 
         # Load the new file's content -- or clear the editor, for a sample
         # that doesn't have a saved .rst yet -- before anything else touches
@@ -562,13 +705,13 @@ class NotesWidget(QWidget):
                 text = new_path.read_text()
                 if text == '':
                     self.editor.clear()
-                    self.status_label.setText(f"File ({file_name}) is empty.")
+                    self.status_bar.showMessage(f"File ({file_name}) is empty.")
                 else:
                     self.editor.setPlainText(text)
-                    self.status_label.setText(f"File ({file_name}) loaded successfully.")
+                    self.status_bar.showMessage(f"File ({file_name}) loaded successfully.")
             except Exception:
                 file_name = new_path.name
-                self.status_label.setText(f"Cannot read {file_name}")
+                self.status_bar.showMessage(f"Cannot read {file_name}")
         else:
             self.editor.clear()
 
@@ -576,15 +719,53 @@ class NotesWidget(QWidget):
         # now safely reflecting the just-loaded/cleared content above)
         self.update_notes_view()
 
-        # start autosave. This setter can run again for every later sample
-        # change, so disconnect first -- otherwise each switch stacks another
-        # timeout->save_notes_file connection, firing multiple redundant
-        # saves per tick.
+        self._restart_autosave_timer()
+        self.notesFileChanged.emit(self._notes_file)
+        self._update_title()
+
+    def _restart_autosave_timer(self):
+        """(Re)connects the autosave timer to ``save_notes_file`` and starts it.
+
+        Called whenever ``notes_file`` starts pointing at a new path (via the
+        property setter, or ``save_notes_file_as``) -- disconnect first,
+        otherwise each switch stacks another timeout->save_notes_file
+        connection, firing multiple redundant saves per tick.
+        """
         try:
             self.autosaveTimer.timeout.disconnect(self.save_notes_file)
         except TypeError:
             pass  # wasn't connected yet (e.g. first file of the session)
         self.autosaveTimer.timeout.connect(self.save_notes_file)
+
+    @property
+    def title_suffix(self) -> str:
+        """A suggested window-title suffix, e.g. ``"(notes.rst*)"``, or ``""`` if no file is set.
+
+        The trailing ``*`` marks unsaved edits (``self.editor.document().isModified()``).
+        Containers (``NotesMainWindow``, ``NotesDock``) combine this with their own
+        base title; also kept current on ``titleChanged`` whenever the file or the
+        modified state changes.
+        """
+        if self._notes_file is None:
+            return ""
+        name = self._notes_file.name
+        if self.editor.document().isModified():
+            name += "*"
+        return f"({name})"
+
+    def _update_title(self):
+        self.titleChanged.emit(self.title_suffix)
+
+    def _on_modification_changed(self, modified: bool):
+        """Keeps the status bar and title suffix in sync with document edits.
+
+        A fresh edit right after a save makes the lingering "...saved."
+        message stale, so it's cleared as soon as the document becomes
+        modified again.
+        """
+        if modified:
+            self.status_bar.clearMessage()
+        self._update_title()
 
         self.autosaveTimer.start()
 
@@ -614,10 +795,10 @@ class NotesWidget(QWidget):
         if self.action_info:
             self.action_info.update_menu(new_menu_items)
 
-            if self._info_menu_items and self.action_info not in self.toolbar.actions():
-                self.toolbar.insertAction(self.action_options, self.action_info)
-            elif not self._info_menu_items and self.action_info in self.toolbar.actions():
-                self.toolbar.removeAction(self.action_info)
+            if self._info_menu_items and self.action_info not in self._insert_toolbar.actions():
+                self._insert_toolbar.addAction(self.action_info)
+            elif not self._info_menu_items and self.action_info in self._insert_toolbar.actions():
+                self._insert_toolbar.removeAction(self.action_info)
 
     def toggleWrap(self, state):
         """Toggles word wrapping in text editing widget.
@@ -648,8 +829,8 @@ class NotesWidget(QWidget):
         if self.action_info:
             self.action_info.add_menu_item(label, callback)
 
-            if self.action_info not in self.toolbar.actions():
-                self.toolbar.insertAction(self.action_options, self.action_info)
+            if self.action_info not in self._insert_toolbar.actions():
+                self._insert_toolbar.addAction(self.action_info)
 
 
     def remove_info_menu_item(self, label):
@@ -669,8 +850,8 @@ class NotesWidget(QWidget):
             if self.action_info:
                 self.action_info.remove_menu_item(item_to_remove)
 
-                if not self._info_menu_items and self.action_info in self.toolbar.actions():
-                    self.toolbar.removeAction(self.action_info)
+                if not self._info_menu_items and self.action_info in self._insert_toolbar.actions():
+                    self._insert_toolbar.removeAction(self.action_info)
 
 
     def update_equation_menu(self):
@@ -711,13 +892,62 @@ class NotesWidget(QWidget):
         if self.notes_file is None:
             return
 
-        self.status_label.setText('Saving notes...')
+        self.status_bar.showMessage('Saving notes...')
+
+        # The containing directory is normally created by whoever handed us
+        # the path, but a note can outlive it (a project directory moved or
+        # removed mid-session) -- recreate rather than lose the content.
+        self.notes_file.parent.mkdir(parents=True, exist_ok=True)
 
         # write file
         with open(self.notes_file,'w') as file:
             file.write(str(self.editor.toPlainText()))
 
-        self.status_label.setText(f"File: {str(self.notes_file)} saved.")
+        # Clears the unsaved-edits "*" from the title (via modificationChanged,
+        # see _on_modification_changed) -- a no-op if there was nothing to save.
+        self.editor.document().setModified(False)
+
+        self.status_bar.showMessage(f"File: {str(self.notes_file)} saved.")
+
+    def new_notes_file(self):
+        """Starts a new, blank, untitled note.
+
+        The outgoing note (if any) is autosaved first, via the ``notes_file``
+        setter.
+        """
+        self.notes_file = None
+
+    def open_notes_file(self):
+        """Prompts for an existing ``.rst`` file and switches to it.
+
+        The outgoing note (if any) is autosaved first, via the ``notes_file``
+        setter.
+        """
+        path, _ = QFileDialog.getOpenFileName(self, "Open Note", "", "reST Files (*.rst);;All Files (*)")
+        if path:
+            self.notes_file = path
+
+    def save_notes_file_as(self):
+        """Saves the current note's content to a new file and makes it the active note file.
+
+        Unlike switching ``notes_file`` to an existing path, this does not
+        reload from disk -- the current editor content is what gets written,
+        and becomes what's kept in sync by autosave going forward.
+        """
+        path, _ = QFileDialog.getSaveFileName(self, "Save Note As", "", "reST Files (*.rst);;All Files (*)")
+        if not path:
+            return
+
+        self._notes_file = Path(path)
+        self.save_notes_file()
+        self.status_bar.showMessage(f"FILE: {str(self._notes_file)}")
+        self._restart_autosave_timer()
+        self.notesFileChanged.emit(self._notes_file)
+        # save_notes_file() above already clears the modified flag, but only
+        # fires _update_title() (via modificationChanged) if that was an
+        # actual change -- explicit call here covers saving-as with no
+        # pending edits, where the filename still needs to update.
+        self._update_title()
 
     def _insert_image(self, filenames, halign, width, alt_text, caption):
         for fn in filenames:
@@ -1061,7 +1291,7 @@ class NotesWidget(QWidget):
         """Converts notes *.rst file to *.pdf"""
         # save note file first to ensure all changes have been recorded
         if self.notes_file is None:
-            self.status_label.setText("WARNING: Cannot save pdf, no notes file found.")
+            self.status_bar.showMessage("WARNING: Cannot save pdf, no notes file found.")
             return
 
         self.save_notes_file()
@@ -1085,10 +1315,10 @@ class NotesWidget(QWidget):
 
             pdf_content = pdf.createPdf(text=rst_content, output=str(pdf_file_path))  # ensure output path is a string
 
-            self.status_label.setText(f"Saved: {str(pdf_file_path)}")
+            self.status_bar.showMessage(f"Saved: {str(pdf_file_path)}")
 
         except Exception as e:
-            self.status_label.setText(f"ERROR: Could not save notes to pdf ({pdf_file_path})")
+            self.status_bar.showMessage(f"ERROR: Could not save notes to pdf ({pdf_file_path})")
             QMessageBox.warning(self, "Error", f"Could not save to pdf.\n{str(e)}")
 
     def to_rst_table(self, df):
@@ -1174,23 +1404,23 @@ class NotesWidget(QWidget):
     def update_notes_view(self):
         """Compiles the .rst file to HTML and displays it in QWebEngineView."""
         if not self.notes_file:
-            self.status_label.setText("ERROR: no notes file found, cannot render preview.")
+            self.status_bar.showMessage("ERROR: no notes file found, cannot render preview.")
             return
 
         try:
             self.save_notes_file()
         except Exception as e:
-            self.status_label.setText(f"ERROR: Failed to save {str(self.notes_file)}")
+            self.status_bar.showMessage(f"ERROR: Failed to save {str(self.notes_file)}")
             return
         
         css_file = Path(__file__).resolve().parent / 'booktabs.css'
         html_file = convert_rst_to_html(self.notes_file, css_path=css_file if css_file.exists() else None)
         if not html_file.exists():
-            self.status_label.setText(f"WARNING: HTML not generated: {html_file}")
+            self.status_bar.showMessage(f"WARNING: HTML not generated: {html_file}")
             return
 
         self.notes_browser.setUrl(QUrl.fromLocalFile(str(html_file)))
-        self.status_label.setText(f"Rendered: {str(html_file)}")
+        self.status_bar.showMessage(f"Rendered: {str(html_file)}")
 
         if self.action_export.isChecked():
             self.save_notes_to_pdf()
