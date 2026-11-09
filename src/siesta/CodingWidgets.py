@@ -26,8 +26,9 @@ def default_font():
 
     return font
 
-BASE_PATH = Path(__file__).parents[2] 
-ICON_PATH = BASE_PATH / "resources" / "icons"
+# Use lame_core's shared icon set (as reSTNotes does) -- a path relative to the
+# repo root doesn't exist once the app is frozen into a .app bundle.
+from lame_core.config import ICONPATH as ICON_PATH
 
 class LineNumberArea(QWidget):
     def __init__(self, editor):

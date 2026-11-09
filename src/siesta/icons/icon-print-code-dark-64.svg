@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" version="1.1" viewBox="0 0 64 64">
+  <!-- paper feeding in at the top -->
+  <rect x="17" y="4" width="30" height="20" rx="1.5" fill="#414042" stroke="#e6e7e8" stroke-width="3"/>
+  <!-- printer body -->
+  <path d="M8,22 h48 a4,4 0 0 1 4,4 v20 a4,4 0 0 1 -4,4 h-7 v-8 h-34 v8 h-7 a4,4 0 0 1 -4,-4 v-20 a4,4 0 0 1 4,-4 z" fill="#e6e7e8"/>
+  <circle cx="51" cy="30" r="2.5" fill="#a8b078"/>
+  <!-- printed page coming out -->
+  <rect x="17" y="38" width="30" height="22" rx="1.5" fill="#414042" stroke="#e6e7e8" stroke-width="3"/>
+  <g fill="none" stroke="#e6e7e8" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><polyline points="27,44 22,49 27,54"/><polyline points="37,44 42,49 37,54"/><line x1="34" y1="43" x2="30" y2="55"/></g>
+</svg>

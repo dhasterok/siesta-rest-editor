@@ -1,12 +1,17 @@
 from pathlib import Path
 import re, subprocess
-from PyQt6.QtCore import ( Qt, QTimer, QSize, QUrl, pyqtSignal )
+from PyQt6.QtCore import ( Qt, QTimer, QSize, QRect, QUrl, pyqtSignal )
 from PyQt6.QtWidgets import (
         QMainWindow, QMessageBox, QFileDialog, QWidget, QVBoxLayout, QFormLayout, QSizePolicy,
         QStatusBar, QDialog, QDialogButtonBox, QToolBar, QSplitter, QTabWidget,
     )
-from PyQt6.QtGui import ( QTextCursor, QIcon, QCursor, QDoubleValidator, QKeySequence )
+from PyQt6.QtGui import (
+        QTextCursor, QIcon, QCursor, QDoubleValidator, QKeySequence, QPainter, QTextDocument,
+        QFont, QFontDatabase,
+    )
 from PyQt6.QtWebEngineWidgets import QWebEngineView
+from PyQt6.QtPrintSupport import QPrinter, QPrintDialog, QAbstractPrintDialog
+from PyQt6.QtPdf import QPdfDocument
 from datetime import datetime
 import numpy as np
 import pandas as pd
@@ -21,6 +26,16 @@ from lame_core.PagedToolBar import PagedToolBar
 from lame_core.SearchTool import SearchWidget
 
 from lame_core.config import ICONPATH as ICON_PATH
+
+# Icons that ship with siesta itself rather than lame_core. CustomAction joins
+# its icon names onto lame_core's ICONPATH, and joining an absolute path onto
+# a Path replaces it outright, so passing these as absolute strings works.
+SIESTA_ICON_PATH = Path(__file__).resolve().parent / "icons"
+
+# Pages from the compiled PDF are rasterized before being sent to the printer;
+# capping the resolution keeps a full A4/Letter page well under ~40 MB in memory
+# (a 1200 dpi printer would otherwise ask for a ~550 MB image per page).
+MAX_PRINT_DPI = 300
 
 def convert_rst_to_html(rst_path: Path, css_path: Path | None = None) -> Path:
     """Converts an rst file to html given a file path.
@@ -274,6 +289,26 @@ class NotesWidget(QWidget):
         )
         self.action_save_as.setShortcut(QKeySequence("Ctrl+Shift+S"))
         self.action_save_as.setToolTip("Save the current note to a new file")
+
+        # Print compiled document (Ctrl+P is already taken by Insert Figure)
+        self.action_print = CustomAction(
+            text="Print",
+            light_icon_unchecked=str(SIESTA_ICON_PATH / "icon-print-64.svg"),
+            dark_icon_unchecked=str(SIESTA_ICON_PATH / "icon-print-dark-64.svg"),
+            parent=self.ribbon,
+        )
+        self.action_print.setShortcut(QKeySequence("Ctrl+Shift+P"))
+        self.action_print.setToolTip("Compile the note to PDF and print it")
+
+        # Print reST source
+        self.action_print_source = CustomAction(
+            text="Print Source",
+            light_icon_unchecked=str(SIESTA_ICON_PATH / "icon-print-code-64.svg"),
+            dark_icon_unchecked=str(SIESTA_ICON_PATH / "icon-print-code-dark-64.svg"),
+            parent=self.ribbon,
+        )
+        self.action_print_source.setShortcut(QKeySequence("Ctrl+Alt+P"))
+        self.action_print_source.setToolTip("Print the reST source code")
 
         # Undo
         self.action_undo = CustomAction(
@@ -537,6 +572,9 @@ class NotesWidget(QWidget):
         standard_toolbar.addAction(self.action_save)
         standard_toolbar.addAction(self.action_save_as)
         standard_toolbar.addSeparator()
+        standard_toolbar.addAction(self.action_print)
+        standard_toolbar.addAction(self.action_print_source)
+        standard_toolbar.addSeparator()
         standard_toolbar.addAction(self.action_undo)
         standard_toolbar.addAction(self.action_redo)
         standard_toolbar.addSeparator()
@@ -636,6 +674,8 @@ class NotesWidget(QWidget):
         self.action_open.triggered.connect(self.open_notes_file)
         self.action_save.triggered.connect(self.save_notes_file)
         self.action_save_as.triggered.connect(self.save_notes_file_as)
+        self.action_print.triggered.connect(lambda _: self.print_document())
+        self.action_print_source.triggered.connect(lambda _: self.print_source())
         self.action_undo.triggered.connect(self.editor.undo)
         self.action_redo.triggered.connect(self.editor.redo)
         self.editor.document().undoAvailable.connect(self.action_undo.setEnabled)
@@ -1287,19 +1327,24 @@ class NotesWidget(QWidget):
     #def convert_to_string(self, array):
     #    return np.array2string(array, formatter={'all': lambda x: f'{x:02f}'})
 
-    def save_notes_to_pdf(self):
-        """Converts notes *.rst file to *.pdf"""
+    def save_notes_to_pdf(self) -> Path | None:
+        """Converts notes *.rst file to *.pdf
+
+        Returns
+        -------
+        Path | None
+            Path to the compiled PDF, or None if it could not be created.
+        """
         # save note file first to ensure all changes have been recorded
         if self.notes_file is None:
             self.status_bar.showMessage("WARNING: Cannot save pdf, no notes file found.")
-            return
+            return None
 
         self.save_notes_file()
 
+        rst_path = Path(self.notes_file)
+        pdf_file_path = rst_path.with_suffix('.pdf')
         try:
-            rst_path = Path(self.notes_file)
-            pdf_file_path = rst_path.with_suffix('.pdf')
-
             # Read the .rst file content
             rst_content = rst_path.read_text(encoding='utf-8')  # specify encoding for robustness
 
@@ -1316,10 +1361,112 @@ class NotesWidget(QWidget):
             pdf_content = pdf.createPdf(text=rst_content, output=str(pdf_file_path))  # ensure output path is a string
 
             self.status_bar.showMessage(f"Saved: {str(pdf_file_path)}")
+            return pdf_file_path
 
         except Exception as e:
             self.status_bar.showMessage(f"ERROR: Could not save notes to pdf ({pdf_file_path})")
             QMessageBox.warning(self, "Error", f"Could not save to pdf.\n{str(e)}")
+            return None
+
+    def print_document(self):
+        """Compiles the notes to PDF and sends the PDF to a printer.
+
+        The PDF produced by rst2pdf (the same one *Save PDF* writes) is what gets
+        printed, so the printout matches the saved PDF rather than the HTML preview.
+        """
+        pdf_path = self.save_notes_to_pdf()
+        if pdf_path is None:
+            return
+
+        pdf = QPdfDocument(self)
+        pdf.load(str(pdf_path))
+        if pdf.status() != QPdfDocument.Status.Ready or pdf.pageCount() == 0:
+            QMessageBox.warning(self, "Print", f"Could not open the compiled PDF for printing:\n{pdf_path}")
+            return
+        page_count = pdf.pageCount()
+
+        printer = QPrinter(QPrinter.PrinterMode.HighResolution)
+        printer.setDocName(pdf_path.name)
+        # The PDF already carries its own margins, so draw on the whole sheet.
+        printer.setFullPage(True)
+
+        dialog = QPrintDialog(printer, self)
+        dialog.setWindowTitle("Print Document")
+        dialog.setMinMax(1, page_count)
+        dialog.setOption(QAbstractPrintDialog.PrintDialogOption.PrintPageRange, True)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        if printer.printRange() == QPrinter.PrintRange.PageRange:
+            first = max(printer.fromPage(), 1) - 1
+            last = min(printer.toPage(), page_count) - 1
+        else:
+            first, last = 0, page_count - 1
+
+        painter = QPainter()
+        if not painter.begin(printer):
+            QMessageBox.warning(self, "Print", "Could not start printing.")
+            return
+
+        try:
+            paper = printer.paperRect(QPrinter.Unit.DevicePixel)
+            dpi = min(printer.resolution(), MAX_PRINT_DPI)
+            for i, page in enumerate(range(first, last + 1)):
+                if i > 0:
+                    printer.newPage()
+
+                # rasterize the page at a bounded resolution...
+                page_pts = pdf.pagePointSize(page)
+                image = pdf.render(page, QSize(round(page_pts.width() * dpi / 72),
+                                               round(page_pts.height() * dpi / 72)))
+
+                # ...then scale it to fit the sheet, centred, keeping aspect ratio
+                target = QSize(image.size())
+                target.scale(paper.size().toSize(), Qt.AspectRatioMode.KeepAspectRatio)
+                x = round(paper.x() + (paper.width() - target.width()) / 2)
+                y = round(paper.y() + (paper.height() - target.height()) / 2)
+                painter.drawImage(QRect(x, y, target.width(), target.height()), image)
+        finally:
+            painter.end()
+            pdf.close()
+
+        self.status_bar.showMessage(f"Sent {pdf_path.name} to printer.")
+
+    def print_source(self):
+        """Prints the reST source shown in the editor, in a monospaced font.
+
+        If text is selected, the print dialog offers to print only the selection.
+        """
+        printer = QPrinter(QPrinter.PrinterMode.HighResolution)
+        printer.setDocName(self.notes_file.name if self.notes_file else "Untitled.rst")
+
+        cursor = self.editor.textCursor()
+        dialog = QPrintDialog(printer, self)
+        dialog.setWindowTitle("Print Source")
+        if cursor.hasSelection():
+            dialog.setOption(QAbstractPrintDialog.PrintDialogOption.PrintSelection, True)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        if printer.printRange() == QPrinter.PrintRange.Selection and cursor.hasSelection():
+            # selectedText() uses U+2029 as its paragraph separator
+            text = cursor.selectedText().replace('', '\n')
+        else:
+            text = self.editor.toPlainText()
+
+        # Print a plain copy rather than the editor's own document so the
+        # editor's (possibly dark) colour theme doesn't end up on paper.
+        doc = QTextDocument()
+        font = QFontDatabase.systemFont(QFontDatabase.SystemFont.FixedFont)
+        font.setFamilies(["Menlo", "Monaco", "Consolas", "Courier New", font.family()])
+        font.setStyleHint(QFont.StyleHint.Monospace)
+        font.setFixedPitch(True)
+        font.setPointSize(9)
+        doc.setDefaultFont(font)
+        doc.setPlainText(text)
+        doc.print(printer)  # no page size set, so Qt adds page numbers
+
+        self.status_bar.showMessage("Sent source to printer.")
 
     def to_rst_table(self, df):
         """Converts a Pandas DataFrame to a reST table string.
