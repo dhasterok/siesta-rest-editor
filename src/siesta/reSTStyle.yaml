@@ -19,5 +19,5 @@ styles:
   table-heading:
     parent: table-body      # kill the default heading background/color
     backColor: null
-    fontName: stdBold
+    fontName: fontSansBold  # rst2pdf alias (Helvetica-Bold); an unknown name makes rst2pdf search the disk for it
     alignment: TA_LEFT

@@ -16,6 +16,8 @@ from datetime import datetime
 import numpy as np
 import pandas as pd
 from rst2pdf.createpdf import RstToPdf
+from rst2pdf import findfonts
+import contextlib, shutil
 from docutils.core import publish_string, publish_file
 import lame_core.format as fmt
 
@@ -36,6 +38,18 @@ SIESTA_ICON_PATH = Path(__file__).resolve().parent / "icons"
 # capping the resolution keeps a full A4/Letter page well under ~40 MB in memory
 # (a 1200 dpi printer would otherwise ask for a ~550 MB image per page).
 MAX_PRINT_DPI = 300
+
+# Where rst2pdf should look for fonts that aren't PDF built-ins. These folders
+# aren't privacy-protected, so searching them never triggers access prompts.
+SYSTEM_FONT_DIRS = ("/System/Library/Fonts", "/Library/Fonts", "~/Library/Fonts")
+
+# When a font isn't in its search path, rst2pdf falls back to fontconfig's
+# `fc-match`. That's usually a Homebrew tool, so it's missing from a
+# Finder-launched app's PATH (or from the system entirely) and rst2pdf crashes
+# with "No such file or directory: 'fc-match'". Without it, treat the font as
+# not found, so rst2pdf reports the missing font instead of crashing.
+if shutil.which("fc-match") is None:
+    findfonts.findTTFont = lambda fname: []
 
 def convert_rst_to_html(rst_path: Path, css_path: Path | None = None) -> Path:
     """Converts an rst file to html given a file path.
@@ -289,6 +303,16 @@ class NotesWidget(QWidget):
         )
         self.action_save_as.setShortcut(QKeySequence("Ctrl+Shift+S"))
         self.action_save_as.setToolTip("Save the current note to a new file")
+
+        # Close note
+        self.action_close = CustomAction(
+            text="Close",
+            light_icon_unchecked=str(SIESTA_ICON_PATH / "icon-close-file-64.svg"),
+            dark_icon_unchecked=str(SIESTA_ICON_PATH / "icon-close-file-dark-64.svg"),
+            parent=self.ribbon,
+        )
+        self.action_close.setShortcut(QKeySequence("Ctrl+W"))  # Cmd+W on macOS
+        self.action_close.setToolTip("Save and close the current note")
 
         # Print compiled document (Ctrl+P is already taken by Insert Figure)
         self.action_print = CustomAction(
@@ -571,6 +595,7 @@ class NotesWidget(QWidget):
         standard_toolbar.addAction(self.action_open)
         standard_toolbar.addAction(self.action_save)
         standard_toolbar.addAction(self.action_save_as)
+        standard_toolbar.addAction(self.action_close)
         standard_toolbar.addSeparator()
         standard_toolbar.addAction(self.action_print)
         standard_toolbar.addAction(self.action_print_source)
@@ -674,6 +699,7 @@ class NotesWidget(QWidget):
         self.action_open.triggered.connect(self.open_notes_file)
         self.action_save.triggered.connect(self.save_notes_file)
         self.action_save_as.triggered.connect(self.save_notes_file_as)
+        self.action_close.triggered.connect(lambda _: self.close_notes_file())
         self.action_print.triggered.connect(lambda _: self.print_document())
         self.action_print_source.triggered.connect(lambda _: self.print_source())
         self.action_undo.triggered.connect(self.editor.undo)
@@ -956,6 +982,50 @@ class NotesWidget(QWidget):
         setter.
         """
         self.notes_file = None
+
+    def close_notes_file(self) -> bool:
+        """Closes the current note, leaving an empty editor and preview.
+
+        A note with a file is saved first (via the ``notes_file`` setter), as
+        when switching notes. An untitled note with unsaved text has nowhere to
+        autosave to, so the user is asked whether to save it, discard it, or
+        cancel.
+
+        Returns
+        -------
+        bool
+            True if the note was closed, False if the user cancelled.
+        """
+        doc = self.editor.document()
+        if self.notes_file is None and doc.isModified() and not doc.isEmpty():
+            reply = QMessageBox.question(
+                self,
+                "Close Note",
+                "This note has not been saved. Save it before closing?",
+                QMessageBox.StandardButton.Save
+                | QMessageBox.StandardButton.Discard
+                | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Save,
+            )
+            if reply == QMessageBox.StandardButton.Cancel:
+                return False
+            if reply == QMessageBox.StandardButton.Save:
+                self.save_notes_file_as()
+                if self.notes_file is None:  # cancelled the Save As dialog
+                    return False
+
+        closed = self.notes_file
+        self.notes_file = None  # saves the outgoing file and clears the editor
+        # ...but the setter is a no-op when there was no file to begin with
+        # (an untitled note), so clear explicitly too.
+        self.editor.clear()
+        self.autosaveTimer.stop()
+        doc.setModified(False)
+        self.notes_browser.setHtml("")
+
+        self.status_bar.showMessage(f"Closed {closed.name}" if closed else "Closed note")
+        self._update_title()
+        return True
 
     def open_notes_file(self):
         """Prompts for an existing ``.rst`` file and switches to it.
@@ -1350,15 +1420,30 @@ class NotesWidget(QWidget):
 
             # Use the local stylesheet for PDF compilation if available
             style_file = Path(__file__).resolve().parent / 'reSTStyle.yaml'
+            style_kwargs = {}
             if style_file.exists():
-                pdf = RstToPdf(
-                    stylesheets=[style_file.name],
-                    style_path=[str(style_file.parent)],
-                )
-            else:
-                pdf = RstToPdf()
+                style_kwargs = dict(stylesheets=[style_file.name], style_path=[str(style_file.parent)])
 
-            pdf_content = pdf.createPdf(text=rst_content, output=str(pdf_file_path))  # ensure output path is a string
+            # rst2pdf always adds '.' to its font search path and walks it
+            # recursively whenever a style names a font it doesn't know. An app
+            # launched from Finder starts in '/', so that walk would cover the
+            # whole disk (and trigger macOS folder-access prompts). Compile from
+            # the note's own folder instead, which also makes relative image
+            # paths in the note resolve as they do in the HTML preview.
+            with contextlib.chdir(rst_path.parent):
+                pdf = RstToPdf(
+                    basedir=str(rst_path.parent),
+                    font_path=list(SYSTEM_FONT_DIRS),
+                    # rst2pdf's Python API defaults to a page break before every
+                    # top-level section (breaklevel=1), each starting on an odd
+                    # page (breakside='odd', which inserts blank pages). Let the
+                    # notes flow continuously instead; an explicit
+                    # ``.. raw:: pdf`` / ``PageBreak`` still works if needed.
+                    breaklevel=0,
+                    breakside='any',
+                    **style_kwargs,
+                )
+                pdf.createPdf(text=rst_content, source_path=str(rst_path), output=str(pdf_file_path))
 
             self.status_bar.showMessage(f"Saved: {str(pdf_file_path)}")
             return pdf_file_path

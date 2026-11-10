@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" version="1.1" viewBox="0 0 64 64">
+  <!-- document with folded corner -->
+  <path d="M12,3 h26 l14,14 v44 h-40 z" fill="#fff" stroke="#4d4d4f" stroke-width="3" stroke-linejoin="round"/>
+  <path d="M38,3 v14 h14" fill="none" stroke="#4d4d4f" stroke-width="3" stroke-linejoin="round"/>
+  <g stroke="#4d4d4f" stroke-width="2.5" stroke-linecap="round">
+    <line x1="19" y1="16" x2="31" y2="16"/><line x1="19" y1="24" x2="44" y2="24"/>
+  </g>
+  <!-- close badge -->
+  <circle cx="44" cy="46" r="15" fill="#ca605e" stroke="#fff" stroke-width="2.5"/>
+  <g stroke="#fff" stroke-width="4" stroke-linecap="round">
+    <line x1="38" y1="40" x2="50" y2="52"/><line x1="50" y1="40" x2="38" y2="52"/>
+  </g>
+</svg>
